@@ -1,0 +1,295 @@
+import { StatusBar } from "expo-status-bar"
+import { useCallback, useEffect, useMemo, useState } from "react"
+import {
+  Alert,
+  BackHandler,
+  Pressable,
+  ScrollView,
+  Text,
+  TextInput,
+  View,
+} from "react-native"
+import { SafeAreaView } from "react-native-safe-area-context"
+import { useFocusEffect } from "@react-navigation/native"
+import type { NativeStackScreenProps } from "@react-navigation/native-stack"
+
+import { ActionButton } from "../components/ActionButton"
+import { AppHeader } from "../components/AppHeader"
+import { BackToTrainingButton } from "../components/BackToTrainingButton"
+import { CalendarView } from "../components/CalendarView"
+import {
+  readSavedWorkouts,
+  removeSavedWorkout,
+  writeSavedWorkouts,
+  type SavedWorkoutsByDate,
+} from "../storage/savedWorkouts"
+import type { Workout } from "../types/workout"
+import type { RootStackParamList } from "../../App"
+import { formatDateLabel, todayKey } from "../utils/date"
+import { makeStyles, palette } from "./stylesheets/SavedWorkoutsScreen.styles"
+
+type Props = NativeStackScreenProps<RootStackParamList, "SavedWorkouts">
+
+type ViewMode = "day" | "calendar"
+
+export function SavedWorkoutsScreen({ route, navigation }: Props) {
+  const isDark = route.params?.isDark ?? false
+  const styles = useMemo(() => makeStyles(isDark), [isDark])
+  const accent = palette(isDark).accent
+
+  const [map, setMap] = useState<SavedWorkoutsByDate>({})
+  const [viewMode, setViewMode] = useState<ViewMode>(
+    route.params?.initialView ?? "day",
+  )
+  // True when the calendar was opened from the day view (vs. straight from
+  // Training), so back from the calendar returns to the day view.
+  const [calendarFromDay, setCalendarFromDay] = useState(false)
+  const [selectedDate, setSelectedDate] = useState<string>(todayKey())
+  // Which workout cards are expanded to show their sets. Collapsed by default.
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({})
+
+  function toggleExpanded(id: string): void {
+    setExpanded((prev) => ({ ...prev, [id]: !prev[id] }))
+  }
+
+  useFocusEffect(
+    useCallback(() => {
+      let active = true
+      readSavedWorkouts()
+        .then((items) => {
+          if (active) setMap(items)
+        })
+        .catch(() => {
+          // Keep current data if storage is unavailable.
+        })
+      return () => {
+        active = false
+      }
+    }, []),
+  )
+
+  // Android hardware back: the calendar is a view mode, not a stack screen, so
+  // without this it would pop the whole screen instead of returning to the day
+  // view it was opened from.
+  useEffect(() => {
+    if (viewMode !== "calendar" || !calendarFromDay) return
+    const sub = BackHandler.addEventListener("hardwareBackPress", () => {
+      setViewMode("day")
+      return true
+    })
+    return () => sub.remove()
+  }, [viewMode, calendarFromDay])
+
+  const dayWorkouts = map[selectedDate] ?? []
+
+  // Days that have at least one workout get a dot; the selected day is
+  // highlighted. Built from the same map the day view reads.
+  const markedDates = useMemo(() => {
+    const marks: Record<string, object> = {}
+    for (const [date, list] of Object.entries(map)) {
+      if (list.length) marks[date] = { marked: true, dotColor: accent }
+    }
+    marks[selectedDate] = {
+      ...marks[selectedDate],
+      selected: true,
+      selectedColor: accent,
+    }
+    return marks
+  }, [map, selectedDate, accent])
+
+  function onChangeSetField(
+    workoutId: string,
+    setIndex: number,
+    field: "weight" | "reps",
+    text: string,
+  ): void {
+    const digits = text.replace(/[^0-9]/g, "")
+    const value = digits === "" ? undefined : Number(digits)
+    setMap((prev) => ({
+      ...prev,
+      [selectedDate]: (prev[selectedDate] ?? []).map((w) =>
+        w.id === workoutId
+          ? {
+              ...w,
+              setDetails: (w.setDetails ?? []).map((set, i) =>
+                i === setIndex ? { ...set, [field]: value } : set,
+              ),
+            }
+          : w,
+      ),
+    }))
+  }
+
+  function persist(): void {
+    writeSavedWorkouts(map).catch(() => {
+      Alert.alert("Save failed", "Could not update local storage.")
+    })
+  }
+
+  function onDelete(item: Workout): void {
+    Alert.alert(
+      "Delete workout?",
+      `Remove "${item.name}" from ${formatDateLabel(selectedDate)}?`,
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Delete",
+          style: "destructive",
+          onPress: async () => {
+            try {
+              const next = await removeSavedWorkout(selectedDate, item.id)
+              setMap(next)
+            } catch {
+              Alert.alert("Delete failed", "Could not update local storage.")
+            }
+          },
+        },
+      ],
+    )
+  }
+
+  if (viewMode === "calendar") {
+    return (
+      <CalendarView
+        isDark={isDark}
+        markedDates={markedDates}
+        onSelectDate={(date) => {
+          setSelectedDate(date)
+          setViewMode("day")
+        }}
+        onBack={() =>
+          calendarFromDay ? setViewMode("day") : navigation.goBack()
+        }
+      />
+    )
+  }
+
+  return (
+    <SafeAreaView style={styles.safeArea}>
+      <StatusBar style={isDark ? "light" : "dark"} />
+      <View style={[styles.container, styles.dayContainer]}>
+        <AppHeader isDark={isDark} onBack={() => navigation.goBack()} />
+        <View style={styles.card}>
+          <View style={styles.headerButtonsRow}>
+            <BackToTrainingButton />
+            <ActionButton
+              label="View Calendar"
+              size="small"
+              onPress={() => {
+                setCalendarFromDay(true)
+                setViewMode("calendar")
+              }}
+            />
+          </View>
+        </View>
+        <View style={[styles.card, styles.dayCard]}>
+          <Text style={styles.heading}>{formatDateLabel(selectedDate)}</Text>
+          {dayWorkouts.length ? (
+            <Text style={styles.helperText}>
+              Tap a workout to view and edit its sets.
+            </Text>
+          ) : (
+            <Text style={styles.helperText}>
+              No workouts saved on this day. Tap "view calendar" to pick another
+              day, or find a workout on the training screen to save for today.
+            </Text>
+          )}
+          {dayWorkouts.length ? (
+            <ScrollView
+              style={styles.workoutList}
+              contentContainerStyle={styles.workoutListContent}
+              nestedScrollEnabled
+            >
+              {dayWorkouts.map((item) => {
+          const setCount = (item.setDetails ?? []).length
+          const isExpanded = !!expanded[item.id]
+          return (
+          <View
+            key={item.id}
+            style={[styles.card, !isExpanded && styles.cardCollapsed]}
+          >
+            <View style={styles.cardHeader}>
+              <Pressable
+                onPress={() => toggleExpanded(item.id)}
+                style={styles.cardTitlePress}
+                accessibilityLabel={`${isExpanded ? "Collapse" : "Expand"} ${item.name}`}
+                accessibilityRole="button"
+              >
+                <Text style={styles.chevron}>{isExpanded ? "▾" : "▸"}</Text>
+                <View style={styles.cardTitleTextWrap}>
+                  <Text style={styles.cardTitle}>{item.name}</Text>
+                  <Text style={styles.cardSubtitle}>
+                    {setCount} {setCount === 1 ? "set" : "sets"}
+                  </Text>
+                </View>
+              </Pressable>
+              <ActionButton
+                label="View"
+                size="small"
+                onPress={() =>
+                  navigation.navigate("WorkoutDetail", { workout: item, isDark })
+                }
+              />
+              <Pressable
+                onPress={() => onDelete(item)}
+                style={({ pressed }) => [
+                  styles.deleteButton,
+                  pressed && styles.deleteButtonPressed,
+                ]}
+                accessibilityLabel={`Delete ${item.name}`}
+                accessibilityRole="button"
+                hitSlop={8}
+              >
+                <Text style={styles.deleteButtonText}>Delete</Text>
+              </Pressable>
+            </View>
+            {isExpanded &&
+              (item.setDetails ?? []).map((set, index) => (
+              <View key={index} style={styles.setRow}>
+                <Text style={styles.setRowLabel}>Set {index + 1}</Text>
+                <View style={styles.inputRow}>
+                  <View style={styles.inputGroup}>
+                    <Text style={styles.inputLabel}>Weight (lbs)</Text>
+                    <TextInput
+                      style={styles.numberInput}
+                      value={set.weight != null ? String(set.weight) : ""}
+                      onChangeText={(text) =>
+                        onChangeSetField(item.id, index, "weight", text)
+                      }
+                      onEndEditing={persist}
+                      keyboardType="number-pad"
+                      placeholder="0"
+                      placeholderTextColor={isDark ? "#6E7681" : "#A0AEC0"}
+                      maxLength={4}
+                      accessibilityLabel={`Weight for set ${index + 1} of ${item.name}`}
+                    />
+                  </View>
+                  <View style={styles.inputGroup}>
+                    <Text style={styles.inputLabel}>Reps</Text>
+                    <TextInput
+                      style={styles.numberInput}
+                      value={set.reps != null ? String(set.reps) : ""}
+                      onChangeText={(text) =>
+                        onChangeSetField(item.id, index, "reps", text)
+                      }
+                      onEndEditing={persist}
+                      keyboardType="number-pad"
+                      placeholder="0"
+                      placeholderTextColor={isDark ? "#6E7681" : "#A0AEC0"}
+                      maxLength={3}
+                      accessibilityLabel={`Reps for set ${index + 1} of ${item.name}`}
+                    />
+                  </View>
+                </View>
+              </View>
+              ))}
+          </View>
+          )
+        })}
+            </ScrollView>
+          ) : null}
+        </View>
+      </View>
+    </SafeAreaView>
+  )
+}
